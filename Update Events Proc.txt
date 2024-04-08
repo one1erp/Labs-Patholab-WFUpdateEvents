@@ -1,0 +1,152 @@
+CREATE GLOBAL TEMPORARY TABLE TMP_ENTITY_EVENT
+(
+  NODE_ID     NUMBER(16),
+  TABLE_NAME  VARCHAR2(255 BYTE),
+  EVENT_STR   VARCHAR2(4000 BYTE)
+)
+ON COMMIT DELETE ROWS;
+
+
+GRANT DELETE, INSERT, SELECT, UPDATE ON  TMP_ENTITY_EVENT TO LIMS_SYS WITH GRANT OPTION;
+
+GRANT SELECT ON  TMP_ENTITY_EVENT TO ROLNIK_R;
+
+
+
+
+
+CREATE OR REPLACE PACKAGE workflow_events AS
+
+  --
+  -- get the entity node id for a givven event node
+  --
+
+  FUNCTION GetParentEntityNodeId ( WFNID IN number ) RETURN number ;
+
+  PROCEDURE UpdateEvents (WFID IN number) ;
+
+  FUNCTION GetEventStr (WFNID in number, EventName in varchar2) return varchar2;
+
+END workflow_events ;
+/
+
+CREATE OR REPLACE PACKAGE body workflow_events AS
+
+  --
+  -- get the entity node id for a givven event node
+  --
+FUNCTION GetParentEntityNodeId ( WFNID IN number ) RETURN number is
+	 ParentId							number;
+	 NodeName					 varchar2(255);
+begin
+	 select parent_id, name into ParentId, NodeName
+	 from workflow_node
+	 where workflow_node_id = WFNID;
+
+	 if trim(upper(NodeName)) in ('SDG','SAMPLE','ALIQUOT','TEST','RESULT','STUDY','PLATE') then
+	 	return(WFNID);
+	else
+		return(GetParentEntityNodeId(ParentId));
+	end if;
+
+end GetParentEntityNodeId;
+
+
+
+
+
+PROCEDURE UpdateEvents (WFID IN number)  is
+
+	   EventStr                         varchar2(4000);
+
+	   cursor EntityEvents is
+	   		  select *
+			  from tmp_entity_event;
+
+	   cursor WFEvents is
+	   		  select *
+	 		  from workflow_node
+	 		  where workflow_id =   WFID
+	 	   	  		and workflow_node_type_id = 13
+			  order by order_number;
+
+begin
+
+-- this table holds the events string agains the node_id
+	 insert into tmp_entity_event  select workflow_node_id node_id, upper(name), null event_str
+	 		  from workflow_node
+	 		  where workflow_id =   WFID
+	 	   	  		and upper(name) in ('SDG','SAMPLE','ALIQUOT','TEST','RESULT','STUDY','PLATE');
+
+-- loop over the event nodes in the workflow and update tmp_entity_event
+   		for WFEvent in WFEvents loop
+			if WFEvent.events = 'Q' then
+					EventStr := '(' || WFEvent.events || '-'
+							 || WFEvent.name || ','
+							 || WFEvent.workflow_id || ','
+							 || WFEvent.order_number || ','
+							 || WFEvent.parameter_3 || ','
+							 || WFEvent.parameter_4 || ')';
+			else
+					EventStr := '(' || WFEvent.events || ','
+							 || WFEvent.workflow_id || ','
+							 || WFEvent.order_number || ','
+							 || WFEvent.parameter_3 || ','
+							 || WFEvent.parameter_4 || ')';
+			end if;
+			update tmp_entity_event set event_str = event_str || EventStr
+				   where node_id = GetParentEntityNodeId( WFEvent.workflow_node_id );
+		end loop;
+
+		for EntityEvent in EntityEvents loop
+			EventStr := 'update ' || EntityEvent.table_name || ' set events = ''' || EntityEvent.event_str || ''' ' ||
+				   'where workflow_node_id = ' || EntityEvent.node_id;
+			execute immediate EventStr;
+		end loop;
+
+		delete tmp_entity_event;
+		commit;
+
+end UpdateEvents;
+
+---------------------------------------
+-- get the string for the event field for a specific item and event name
+---------------------------------------
+FUNCTION GetEventStr (WFNID in number, EventName in varchar2) return varchar2 is
+    retval varchar2(255);
+	NodeRec workflow_node%rowtype;
+
+begin
+    retval := '';
+	
+	begin
+	    select * into NodeRec 
+		from workflow_node
+		where parent_id =   WFNID
+		    and workflow_node_type_id = 13
+			and upper(replace(replace(name,' ',''),'-','')) = 
+			upper(replace(replace(EventName,' ',''),'-',''))
+--------------Original Line------------------------			
+			--and name = EventName
+			--ignoring Case,Spaces,and '-' Symbols
+---------------------------------------------------		
+		order by order_number;
+
+        retval := '(' || NodeRec.events || '-'
+             || NodeRec.name || ','
+             || NodeRec.workflow_id || ','
+             || NodeRec.order_number || ','
+             || NodeRec.parameter_3 || ','
+             || NodeRec.parameter_4 || ')';
+		 
+	EXCEPTION
+      WHEN NO_DATA_FOUND
+      THEN
+         NULL;
+	end;
+
+    return (retval);
+end GetEventStr;
+
+END workflow_events ;
+/
